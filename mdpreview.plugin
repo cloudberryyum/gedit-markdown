@@ -1,0 +1,10 @@
+# Managed by gedit-md-preview-plugin
+[Plugin]
+Loader=python3
+Module=mdpreview
+IAge=3
+Name=Markdown Preview
+Description=Live Markdown preview with offline Mermaid diagrams and code highlighting.
+Authors=Cloudberry
+Copyright=Copyright 2026 Cloudberry
+Version=0.4.0
