@@ -73,8 +73,12 @@ sequenceDiagram
 
 ## Reading controls
 
-Toggle **Full View** to switch between the Right split and a preview-only reading
-area. **Dark Mode** starts on; toggle it off for light mode. Show an outline with
+Use the arrow immediately left of **Dark Mode** to exchange the editor and
+preview sides. Pane widths follow their content. Preview always reopens on the
+right; changing tabs keeps the selected side. Toggle **Full View** for a
+preview-only reading area; toggle it off to restore the selected side. The arrow
+in Full View exits Full and moves preview to the opposite side.
+**Dark Mode** starts on; toggle it off for light mode. Show an outline with
 the left control. Shared zoom sits in gedit's top bar before Preview and scales
 the editor and preview together, including plain text. Scroll sync follows
 relative document position; diagrams and long code blocks can make the two

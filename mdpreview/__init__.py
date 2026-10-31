@@ -63,7 +63,14 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
         self._editor_zoom_styles: dict[Any, Any] = {}
         self._font_handlers: list[tuple[Any, int]] = []
         self._editor_zoom_pending = 0
-        self._right_position: int | None = None
+        self._editor_width: int | None = None
+        self._split_gap = 0
+        self._split_side = "right"
+        self._layout_pending = 0
+        self._layout_settling = False
+        self._layout_positioned = False
+        self._updating_layout = False
+        self._side_control: Any = None
         self._full_control: Any = None
         self._dark_control: Any = None
         self._pending = 0
@@ -205,6 +212,7 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
     def open_preview(self) -> None:
         if self._box is not None:
             return
+        self._layout = self._split_side = "right"
         try:
             for filename in ("vendor.js", "preview.js", "preview.css"):
                 if not (ASSETS / filename).is_file():
@@ -265,6 +273,8 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
         if self._theme == "light":
             self._dark_control.get_image().set_from_icon_name("weather-clear-symbolic", Gtk.IconSize.MENU)
         toolbar.pack_end(self._dark_control, False, False, 0)
+        self._side_control = self._icon_button("go-previous-symbolic", "Move preview left", self._switch_side)
+        toolbar.pack_end(self._side_control, False, False, 0)
         self._box.pack_start(toolbar, False, False, 0)
         manager = self._webkit.UserContentManager()
         self._manager = manager
@@ -306,6 +316,7 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
             bottom.get_parent().show()
             self._full_control.set_active(False)
             self._full_control.set_sensitive(False)
+            self._side_control.set_sensitive(False)
             return
         self._outer = ancestor
         self._notebook = ancestor.get_child1()
@@ -323,24 +334,120 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
     def _apply_layout(self) -> None:
         if self._split is None:
             return
+        self._cancel_layout()
+        self._layout_settling = True
+        self._layout_positioned = False
         if self._layout == "full":
             self._notebook.set_no_show_all(True)
             self._notebook.hide()
             self._web.grab_focus()
+            self._layout_pending = GLib.timeout_add(150, self._finish_layout, self._split)
         else:
             self._notebook.set_no_show_all(self._notebook_no_show_all)
             self._notebook.set_visible(self._notebook_visible)
-            GLib.idle_add(self._position_split)
+            self._layout_pending = GLib.idle_add(self._position_split, self._split)
 
-    def _position_split(self) -> bool:
-        if self._split is not None and self._layout != "full":
-            allocation = self._split.get_allocation()
-            position = self._right_position if self._right_position is not None else max(180, allocation.width // 2)
-            self._split.set_position(position)
+    def _cancel_layout(self) -> None:
+        if self._layout_pending:
+            GLib.source_remove(self._layout_pending)
+            self._layout_pending = 0
+
+    def _position_split(self, split: Any) -> bool:
+        if split is not self._split:
+            return GLib.SOURCE_REMOVE
+        self._layout_pending = 0
+        width = split.get_allocated_width()
+        if width <= 1:
+            self._layout_pending = GLib.timeout_add(16, self._position_split, split)
+            return GLib.SOURCE_REMOVE
+        position = self._editor_width if self._editor_width is not None else max(180, width // 2)
+        if self._split_side == "left":
+            position = width - self._split_gap - position
+        split.set_position(position)
+        self._layout_positioned = True
+        self._layout_pending = GLib.timeout_add(150, self._finish_layout, split)
         return GLib.SOURCE_REMOVE
 
+    def _finish_layout(self, split: Any) -> bool:
+        if split is not self._split:
+            return GLib.SOURCE_REMOVE
+        self._layout_pending = 0
+        self._layout_settling = False
+        return GLib.SOURCE_REMOVE
+
+    def _capture_split(self) -> None:
+        # Pre-allocation clicks must not replace content widths with stale geometry.
+        if self._layout_settling and not self._layout_positioned:
+            return
+        if self._layout != "full" and self._notebook.get_mapped():
+            if abs(self._split.get_child1().get_allocated_width() - self._split.get_position()) > 2:
+                return
+            self._editor_width = self._notebook.get_allocated_width()
+            self._split_gap = max(0, self._split.get_allocated_width()
+                                  - self._editor_width - self._box.get_allocated_width())
+
+    def _pack_split(self, side: str) -> None:
+        """Reorder the same widgets, restoring their parents if packing fails."""
+        children = (self._split.get_child1(), self._split.get_child2())
+        desired = (self._box, self._notebook) if side == "left" else (self._notebook, self._box)
+        if children == desired:
+            return
+        try:
+            for child in children:
+                self._split.remove(child)
+            self._split.pack1(desired[0], True, False)
+            self._split.pack2(desired[1], True, False)
+        except Exception:
+            for child in (self._split.get_child1(), self._split.get_child2()):
+                if child is not None:
+                    self._split.remove(child)
+            self._split.pack1(children[0], True, False)
+            self._split.pack2(children[1], True, False)
+            raise
+
+    def _update_layout_controls(self) -> None:
+        self._updating_layout = True
+        try:
+            full = self._layout == "full"
+            self._full_control.set_active(full)
+            self._full_control.get_image().set_from_icon_name(
+                "view-restore-symbolic" if full else "view-fullscreen-symbolic", Gtk.IconSize.MENU)
+            destination = "left" if self._split_side == "right" else "right"
+            label = "Move preview " + destination
+            self._side_control.set_tooltip_text(label)
+            self._side_control.get_accessible().set_name(label)
+            self._side_control.get_image().set_from_icon_name(
+                "go-previous-symbolic" if destination == "left" else "go-next-symbolic", Gtk.IconSize.MENU)
+        finally:
+            self._updating_layout = False
+
+    def _set_layout(self, layout: str) -> None:
+        if self._split is None:
+            return
+        self._capture_split()
+        self._cancel_layout()
+        self._layout_settling = True
+        self._layout_positioned = False
+        if self._scroll_pending:
+            GLib.source_remove(self._scroll_pending)
+            self._scroll_pending = 0
+        previous = (self._layout, self._split_side)
+        try:
+            if layout != "full":
+                self._pack_split(layout)
+                self._split_side = layout
+            self._layout = layout
+        except Exception:
+            LOGGER.exception("Could not move Markdown Preview; restored the previous split")
+            self._layout, self._split_side = previous
+        self._update_layout_controls()
+        self._apply_layout()
+
+    def _switch_side(self, _button: Any) -> None:
+        self._set_layout("left" if self._split_side == "right" else "right")
+
     def close_preview(self) -> None:
-        for attr in ("_pending", "_scroll_pending", "_scroll_unlock"):
+        for attr in ("_pending", "_scroll_pending", "_scroll_unlock", "_layout_pending"):
             source = getattr(self, attr, 0)
             if source:
                 GLib.source_remove(source)
@@ -360,7 +467,9 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
                     parent.remove(self._box)
                 self._box.destroy()
         self._web = self._box = self._split = self._outer = self._notebook = self._manager = None
-        self._full_control = self._dark_control = None
+        self._full_control = self._dark_control = self._side_control = None
+        self._layout_settling = False
+        self._layout_positioned = False
         self._page_ready = False
         self._fallback = False
         self._syncing = False
@@ -493,7 +602,7 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
                 diagrams = int(message.get("diagrams", 0))
                 errors = int(message.get("errors", 0))
                 self._status.set_text(f"Live · {diagrams} diagram{'s' if diagrams != 1 else ''}" + (f" · {errors} diagram error(s)" if errors else ""))
-            elif kind == "scroll" and self._sync_enabled and self._adjustment is not None:
+            elif kind == "scroll" and self._sync_enabled and not self._layout_settling and self._adjustment is not None:
                 ratio = float(message["ratio"])
                 if 0 <= ratio <= 1:
                     self._syncing = True
@@ -509,7 +618,8 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
             LOGGER.warning("Ignored malformed preview message")
 
     def _source_scrolled(self, _adjustment: Any) -> None:
-        if self._layout != "full" and self._sync_enabled and not self._syncing and not self._scroll_pending:
+        if (self._layout != "full" and not self._layout_settling and self._sync_enabled
+                and not self._syncing and not self._scroll_pending):
             self._scroll_pending = GLib.timeout_add(60, self._send_scroll)
 
     def _send_scroll(self) -> bool:
@@ -533,12 +643,8 @@ class MarkdownPreviewWindow(GObject.Object, Gedit.WindowActivatable):
         self._schedule_render()
 
     def _change_layout(self, button: Any) -> None:
-        if self._split is not None and self._layout == "right":
-            self._right_position = self._split.get_position()
-        self._layout = "full" if button.get_active() else "right"
-        icon = "view-restore-symbolic" if button.get_active() else "view-fullscreen-symbolic"
-        button.get_image().set_from_icon_name(icon, Gtk.IconSize.MENU)
-        self._apply_layout()
+        if not self._updating_layout:
+            self._set_layout("full" if button.get_active() else self._split_side)
 
     def _change_outline(self, button: Any) -> None:
         self._outline_enabled = button.get_active()
